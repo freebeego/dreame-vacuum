@@ -317,6 +317,12 @@ from .map import DreameMapVacuumMapManager, DreameVacuumMapDecoder
 
 _LOGGER = logging.getLogger(__name__)
 
+# Dreamehome cloud delivers live values only as pushes over the device client. When nothing has been pushed for
+# CLOUD_PUSH_TIMEOUT seconds the device is polled over the cloud API instead (every update while it is active,
+# every CLOUD_IDLE_POLL_INTERVAL seconds otherwise so that a started task is still noticed).
+CLOUD_PUSH_TIMEOUT = 60
+CLOUD_IDLE_POLL_INTERVAL = 30
+
 
 class DreameVacuumDevice:
     """Support for Dreame Vacuum"""
@@ -360,6 +366,7 @@ class DreameVacuumDevice:
         self._last_map_request: float = 0  # Last map request trigger time
         self._last_change: float = 0  # Last property change time
         self._last_active: float = 0  # Last active state change time
+        self._last_cloud_poll: float = 0  # Last time properties are polled because the device client is silent
         self._last_update_failed: float = None  # Last update failed time
         self._cleaning_history_update: float = 0  # Cleaning history update time
         self._update_fail_count: int = 0  # Update failed counter
@@ -3621,8 +3628,10 @@ class DreameVacuumDevice:
         if self.status.active:
             self._last_active = now
 
+        push_stale = self._protocol.push_stale(CLOUD_PUSH_TIMEOUT)
         if (
             self._protocol.dreame_cloud
+            and not push_stale
             and self.device_connected
             and self.cloud_connected
             and (self.status.active or now - self._last_active <= 60)
@@ -3664,6 +3673,10 @@ class DreameVacuumDevice:
                 self._water_tank = True
 
             if not self._protocol.dreame_cloud or force_request_properties:
+                self._request_properties(properties)
+            elif push_stale and (self.status.active or now - self._last_cloud_poll >= CLOUD_IDLE_POLL_INTERVAL):
+                # Device client is connected but silent, values would never be updated without polling
+                self._last_cloud_poll = now
                 self._request_properties(properties)
             elif self.status.map_backup_status:
                 self._request_properties([DreameVacuumProperty.MAP_BACKUP_STATUS])

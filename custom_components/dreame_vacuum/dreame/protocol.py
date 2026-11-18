@@ -737,6 +737,7 @@ class DreameVacuumDreameHomeCloudProtocol:
         self._client = None
         self._message_callback = None
         self._connected_callback = None
+        self._last_message_time = None
         self._logged_in = False
         self._auth_failed = False
         self._stream_key = None
@@ -1006,6 +1007,11 @@ class DreameVacuumDreameHomeCloudProtocol:
         return f"{self._model}/{self._uid}/{str(self._did)}/0"
 
     @property
+    def last_message_time(self) -> float | None:
+        """Monotonic time of the last data message pushed over the device client, None if nothing has been received"""
+        return self._last_message_time
+
+    @property
     def logged_in(self) -> bool:
         return self._logged_in
 
@@ -1103,6 +1109,7 @@ class DreameVacuumDreameHomeCloudProtocol:
             try:
                 response = json.loads(message.payload.decode("utf-8"))
                 if "data" in response and response["data"]:
+                    self._last_message_time = time.monotonic()
                     self._client_queue.put((self._message_callback, response["data"]))
             except:
                 pass
@@ -2914,3 +2921,11 @@ class DreameVacuumProtocol:
         if self.cloud:
             return self.cloud.dreame_cloud
         return False
+
+    def push_stale(self, timeout: float) -> bool:
+        """Dreamehome cloud delivers live values (state changes, cleaned area, map frames) only as pushes over the
+        device client. Returns True when no push has been received for the given time so callers can poll instead."""
+        if not self.dreame_cloud:
+            return False
+        last_message_time = getattr(self.cloud, "last_message_time", None)
+        return last_message_time is None or time.monotonic() - last_message_time > timeout

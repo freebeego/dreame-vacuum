@@ -148,6 +148,10 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Dreamehome cloud: when the device client has not pushed anything for this long (seconds) while the device is
+# running, the latest map object is polled instead of waiting for its name to be pushed
+CLOUD_PUSH_TIMEOUT = 60
+
 
 class DreameMapVacuumMapManager:
     def __init__(self, _protocol: DreameVacuumProtocol) -> None:
@@ -193,6 +197,7 @@ class DreameMapVacuumMapManager:
         self._request_queue: dict[str, bool] = {}
         self._latest_map_data_time: int = None
         self._latest_object_name_time: int = None
+        self._polled_object_name_time: int = None
         self._latest_map_timestamp_ms: int = None
         self._latest_map_id: int = None
         self._last_p_request_map_id: int = None
@@ -203,6 +208,29 @@ class DreameMapVacuumMapManager:
         self._map_request_count: int = 0
         self._new_map_request_time: int = None
         self._aes_key: str = None
+
+    def _poll_cloud_object_name(self) -> bool:
+        """Dreamehome cloud keeps the latest map frame of a running device as an object and updates its name property.
+        Load it when it changes, used when the object name is not pushed over the device client."""
+        try:
+            result = self._protocol.cloud.get_properties(DIID(DreameVacuumProperty.OBJECT_NAME))
+        except Exception as ex:
+            _LOGGER.debug("Object name request failed: %s", ex)
+            return False
+
+        if not result or not result[0].get(MAP_PARAMETER_VALUE):
+            return False
+
+        update_date = result[0].get("updateDate")
+        if update_date is not None and update_date == self._polled_object_name_time:
+            return False
+
+        self._polled_object_name_time = update_date
+        self._map_request_time = None
+        self._add_cloud_map_data(
+            None, result[0][MAP_PARAMETER_VALUE], update_date if update_date else int(time.time() * 1000)
+        )
+        return True
 
     def _request_map_from_cloud(self) -> bool:
         if self._protocol.cloud.dreame_cloud:
@@ -1496,6 +1524,12 @@ class DreameMapVacuumMapManager:
                 if not self._connected:
                     self._connected = True
                     self._map_data_changed()
+
+                if self._device_running and self._protocol.push_stale(CLOUD_PUSH_TIMEOUT):
+                    if not self._poll_cloud_object_name():
+                        # Device uploads a new map object rarely when no client is watching,
+                        # request a frame so it is available on the next update
+                        self._request_map()
 
                 if self._map_data is None or (
                     self._device_running
